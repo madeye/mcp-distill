@@ -36,6 +36,35 @@ Why store **both** `blocks` (canonical) and `raw` (provider-native):
 - `raw` is the ground truth — never lose a field from the upstream API
 - `blocks` is the projection downstream tooling actually consumes; cheap to recompute, but pre-computing means exporters never need provider-specific code
 
+### Storage knobs (size matters)
+
+LLM traces are huge (1M-token contexts ≈ MBs of JSON). Two knobs, both
+opt-out / opt-in via env or `StoreOptions`:
+
+| knob | env var | default | purpose |
+| ---- | ------- | ------- | ------- |
+| `keep_raw` | `MCP_DISTILL_KEEP_RAW=1` | **off** | retain the provider-native `raw` field alongside the canonical `blocks` view |
+| `compression` | `MCP_DISTILL_COMPRESSION=zstd` | `none` | per-line zstd frame; file becomes `<id>.jsonl.zst` |
+| `zstd_level` | `MCP_DISTILL_ZSTD_LEVEL=3` | `3` | 1..=22 |
+
+Measured on a synthetic corpus of 4 sessions × 40 turns × ~13 KB/turn
+(~3 MB raw baseline), `cargo run --release --example storage_bench`:
+
+| config | size | vs baseline | write time |
+| ------ | ----:| -----------:| ----------:|
+| raw=on,  none     | 3.09 MB | 1.00× | 50 ms |
+| raw=off, none     | 1.11 MB | 0.36× | 46 ms |
+| raw=on,  zstd-3   | 484 KB  | 0.15× | 71 ms |
+| **raw=off, zstd-3** | **287 KB** | **0.09×** | 77 ms |
+| raw=off, zstd-9   | 251 KB  | 0.08× | 128 ms |
+| raw=off, zstd-19  | 236 KB  | 0.07× | 648 ms |
+
+Recommended for production capture: `keep_raw=false` (default) +
+`MCP_DISTILL_COMPRESSION=zstd` at level 3 — ~11× smaller with negligible
+write overhead. Zstd frames are concatenable, so append-only writes stay
+crash-safe at the line boundary. Read paths auto-detect `.jsonl` vs
+`.jsonl.zst` for the same `session_id`.
+
 ### 2. Export layer — `exports/<format>-<timestamp>.jsonl`
 
 Generated on demand from the raw layer via `export_dataset`. Three targets:

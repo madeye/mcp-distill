@@ -1,13 +1,20 @@
 use mcp_distill::adapters::{claude, codex};
 use mcp_distill::exporters::{session_to_export, Format};
 use mcp_distill::schema::{Provider, RecordKind, SessionMeta, TurnRecord};
-use mcp_distill::storage::{now_rfc3339, Store};
+use mcp_distill::storage::{now_rfc3339, Compression, Store, StoreOptions};
 use serde_json::json;
 use tempfile::TempDir;
 
 fn fresh_store() -> (TempDir, Store) {
     let tmp = TempDir::new().unwrap();
-    let store = Store::new(tmp.path().to_path_buf()).unwrap();
+    // Force defaults so ambient env doesn't perturb the test.
+    let store = Store::with_options(tmp.path().to_path_buf(), StoreOptions::default()).unwrap();
+    (tmp, store)
+}
+
+fn fresh_store_with(opts: StoreOptions) -> (TempDir, Store) {
+    let tmp = TempDir::new().unwrap();
+    let store = Store::with_options(tmp.path().to_path_buf(), opts).unwrap();
     (tmp, store)
 }
 
@@ -212,4 +219,63 @@ fn anthropic_export_preserves_tool_use_blocks() {
     assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
     assert_eq!(msgs[1]["content"][1]["name"], "calc");
     assert_eq!(msgs[1]["content"][1]["input"]["b"], 2);
+}
+
+#[test]
+fn zstd_compressed_roundtrip() {
+    let (_tmp, store) = fresh_store_with(StoreOptions {
+        compression: Compression::Zstd,
+        zstd_level: 3,
+        keep_raw: false,
+    });
+    store.write_meta(&meta("z", Provider::Claude)).unwrap();
+    for (i, content) in ["hello", "world", "from zstd"].iter().enumerate() {
+        store
+            .write_record(
+                "z",
+                &turn_rec(
+                    "z",
+                    (i + 1) as u64,
+                    claude::message_to_turn(&json!({"role": "user", "content": content})),
+                ),
+            )
+            .unwrap();
+    }
+    let path = store.find_session_file("z").unwrap();
+    assert!(
+        path.extension().and_then(|s| s.to_str()) == Some("zst"),
+        "expected .zst file, got {}",
+        path.display()
+    );
+    let recs = store.iter_session("z").unwrap();
+    assert!(matches!(recs[0].kind, RecordKind::Meta));
+    let texts: Vec<_> = recs
+        .iter()
+        .skip(1)
+        .filter_map(|r| r.turn.as_ref())
+        .map(|t| t.blocks[0].text.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(texts, vec!["hello", "world", "from zstd"]);
+}
+
+#[test]
+fn keep_raw_off_drops_raw_field() {
+    let (_tmp, store) = fresh_store_with(StoreOptions {
+        compression: Compression::None,
+        zstd_level: 3,
+        keep_raw: false,
+    });
+    store.write_meta(&meta("r", Provider::Claude)).unwrap();
+    store
+        .write_record(
+            "r",
+            &turn_rec(
+                "r",
+                1,
+                claude::message_to_turn(&json!({"role": "user", "content": "hi"})),
+            ),
+        )
+        .unwrap();
+    let recs = store.iter_session("r").unwrap();
+    assert!(recs[1].turn.as_ref().unwrap().raw.is_none());
 }
