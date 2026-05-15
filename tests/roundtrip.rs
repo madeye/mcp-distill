@@ -279,3 +279,35 @@ fn keep_raw_off_drops_raw_field() {
     let recs = store.iter_session("r").unwrap();
     assert!(recs[1].turn.as_ref().unwrap().raw.is_none());
 }
+
+// Server auto-record env vars are process-global; serialize these tests so
+// parallel test threads don't trample each other's MCP_DISTILL_AUTO_* state.
+static SERVER_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[test]
+fn server_auto_starts_session_on_construct() {
+    use mcp_distill::server::DistillServer;
+    let _g = SERVER_ENV_LOCK.lock();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MCP_DISTILL_AUTO_RECORD", "1");
+    std::env::set_var("MCP_DISTILL_AUTO_PROVIDER", "codex");
+    let _server = DistillServer::new(tmp.path().to_path_buf()).unwrap();
+    std::env::remove_var("MCP_DISTILL_AUTO_RECORD");
+    std::env::remove_var("MCP_DISTILL_AUTO_PROVIDER");
+    let store = Store::with_options(tmp.path().to_path_buf(), Default::default()).unwrap();
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1, "expected one auto-started session");
+    assert_eq!(sessions[0].provider, "codex");
+}
+
+#[test]
+fn server_skips_auto_session_when_disabled() {
+    use mcp_distill::server::DistillServer;
+    let _g = SERVER_ENV_LOCK.lock();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MCP_DISTILL_AUTO_RECORD", "0");
+    let _server = DistillServer::new(tmp.path().to_path_buf()).unwrap();
+    std::env::remove_var("MCP_DISTILL_AUTO_RECORD");
+    let store = Store::with_options(tmp.path().to_path_buf(), Default::default()).unwrap();
+    assert!(store.list_sessions().unwrap().is_empty());
+}

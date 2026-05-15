@@ -38,16 +38,25 @@ Wire it into **Claude Code** automatically (requires `claude` CLI):
 
 ## MCP tools exposed
 
-| Tool                 | What it does                                                      |
-| -------------------- | ----------------------------------------------------------------- |
-| `start_session`      | Open a session for `claude` or `codex`. Returns `session_id`.     |
-| `append_turn`        | Append a provider-native message (request or response).           |
-| `append_usage`       | Record token usage for the most recent assistant turn.            |
-| `end_session`        | Mark a session ended.                                             |
-| `record_interaction` | One-shot: start + write all messages + response in a single call. |
-| `list_sessions`      | List captured sessions.                                           |
-| `export_dataset`     | Emit JSONL in `openai_chat` / `sharegpt` / `anthropic` format.    |
-| `stats`              | Session/turn counts, providers seen, storage root.                |
+| Tool                 | What it does                                                                  |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `recording_status`   | Whether a session is currently recording, and which one.                      |
+| `stop_recording`     | Halt the auto-started session (writes an `end` record).                       |
+| `start_recording`    | Open a fresh session and make it current.                                     |
+| `start_session`      | Open a session and make it current. Returns `session_id`.                     |
+| `append_turn`        | Append a provider-native message. `session_id` optional → uses current.       |
+| `append_usage`       | Record token usage. `session_id` optional → uses current.                     |
+| `end_session`        | Mark a session ended (current if `session_id` omitted).                       |
+| `record_interaction` | One-shot: start + write all messages + response in a single call.             |
+| `list_sessions`      | List captured sessions.                                                       |
+| `export_dataset`     | Emit JSONL in `openai_chat` / `sharegpt` / `anthropic` format.                |
+| `stats`              | Session/turn counts, providers seen, storage root.                            |
+
+**Auto-recording**: the server opens a session at launch and routes
+implicit `append_turn` calls to it. The provider for that session comes
+from `MCP_DISTILL_AUTO_PROVIDER` (`install {codex,claude}` seeds this).
+Disable with `MCP_DISTILL_AUTO_RECORD=0`. Manually halt with
+`stop_recording`; resume with `start_recording`.
 
 ## Storage
 

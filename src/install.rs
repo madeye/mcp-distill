@@ -139,6 +139,13 @@ fn env_pairs(spec: &InstallSpec) -> Vec<(&'static str, String)> {
     if let Some(comp) = &spec.compression {
         envs.push(("MCP_DISTILL_COMPRESSION", comp.clone()));
     }
+    // Seed the auto-recording provider so the server knows which adapter to
+    // use for the implicit session it opens at launch.
+    let provider = match spec.client {
+        Client::Codex => "codex",
+        Client::Claude => "claude",
+    };
+    envs.push(("MCP_DISTILL_AUTO_PROVIDER", provider.into()));
     envs
 }
 
@@ -167,10 +174,12 @@ fn install_codex(spec: &InstallSpec) -> Result<InstallReport> {
     let new_table = build_server_table(spec);
     let action = match servers.get(&spec.server_name) {
         Some(Item::Table(existing)) => {
-            if server_tables_equal(existing, &new_table) {
-                Action::Unchanged
-            } else if spec.force {
+            if spec.force {
+                // Always overwrite under --force; the equality check below is a
+                // best-effort idempotency hint, not the source of truth.
                 Action::Updated
+            } else if server_tables_equal(existing, &new_table) {
+                Action::Unchanged
             } else {
                 return Err(anyhow!(
                     "[mcp_servers.{}] already exists and differs from the new entry; \
@@ -394,7 +403,8 @@ mod tests {
         assert!(body.contains("MCP_DISTILL_ROOT"));
         assert!(body.contains("MCP_DISTILL_COMPRESSION"));
         assert!(!body.contains("MCP_DISTILL_KEEP_RAW")); // off by default
-                                                         // Auto-approve so codex doesn't cancel our MCP calls.
+        assert!(body.contains("MCP_DISTILL_AUTO_PROVIDER = \"codex\""));
+        // Auto-approve so codex doesn't cancel our MCP calls.
         assert!(body.contains("default_tools_approval_mode = \"approve\""));
     }
 
@@ -471,14 +481,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_argv_omits_unset_env() {
+    fn claude_argv_omits_unset_env_but_keeps_auto_provider() {
         let mut spec = make_spec("distill");
         spec.client = Client::Claude;
         spec.store_root = None;
         spec.compression = None;
         spec.keep_raw = false;
         let argv = claude_install_argv(&spec);
-        assert!(!argv.iter().any(|s| s.starts_with("--env=")));
+        // Auto-provider is always seeded so the server's implicit session
+        // attributes turns to the right adapter.
+        assert!(argv
+            .iter()
+            .any(|s| s == "--env=MCP_DISTILL_AUTO_PROVIDER=claude"));
+        assert!(!argv.iter().any(|s| s.starts_with("--env=MCP_DISTILL_ROOT")));
+        assert!(!argv
+            .iter()
+            .any(|s| s.starts_with("--env=MCP_DISTILL_COMPRESSION")));
     }
 
     #[test]
