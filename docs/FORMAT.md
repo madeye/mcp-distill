@@ -79,6 +79,37 @@ Default recommendation for distillation into a small model: **`openai_chat`**.
 It's the broadest target across open-source SFT trainers (TRL, Axolotl,
 LLaMA-Factory, vLLM, Unsloth) and preserves tool-calling natively.
 
+### Using exports with Unsloth
+
+The `openai_chat` export drops straight into Unsloth's SFT path; `sharegpt`
+needs one normalize call.
+
+```python
+from datasets import load_dataset
+from unsloth.chat_templates import standardize_sharegpt
+
+# A) openai_chat — already in Unsloth's preferred shape
+ds = load_dataset("json", data_files="exports/openai_chat-*.jsonl", split="train")
+
+# B) sharegpt — one extra normalize step
+ds = load_dataset("json", data_files="exports/sharegpt-*.jsonl", split="train")
+ds = standardize_sharegpt(ds)  # rewrites {from,value} -> {role,content}
+```
+
+Then pass `ds` to `SFTTrainer` and let `apply_chat_template` handle formatting.
+
+Two gotchas to watch for:
+
+1. **Assistant turns with only `tool_calls`** carry `content: null` in the
+   `openai_chat` export. Modern templates (Llama 3.1+, Qwen 2.5, Mistral,
+   DeepSeek-R1) handle this; older templates (some Phi/Gemma variants) error
+   on null content. If yours does, `dataset.map(...)` to coerce null → `""`.
+2. **`role: "tool"` messages** require a tool-aware chat template. If your
+   target model lacks tool support, filter those rows out:
+   ```python
+   ds = ds.filter(lambda r: all(m["role"] != "tool" for m in r["messages"]))
+   ```
+
 ## Why not Parquet / Arrow / SQLite?
 
 - Distillation pipelines almost universally consume JSON/JSONL. Parquet would
