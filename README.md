@@ -15,7 +15,17 @@ cargo build --release
 ./target/release/mcp-distill serve        # run as MCP server over stdio
 ```
 
-Wire it into Claude Code:
+Wire it into **codex** automatically:
+
+```bash
+./target/release/mcp-distill install codex \
+  --store-root ~/.mcp-distill --compression zstd
+# adds [mcp_servers.distill] to ~/.codex/config.toml (preserves other settings)
+# `install codex --force` overwrites a differing existing entry
+# `uninstall codex` removes it
+```
+
+Wire it into Claude Code manually:
 
 ```jsonc
 // .claude/settings.json
