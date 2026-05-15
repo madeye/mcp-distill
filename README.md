@@ -69,3 +69,26 @@ $MCP_DISTILL_ROOT (default: ~/.mcp-distill)/
 
 See [`docs/FORMAT.md`](docs/FORMAT.md) for the full schema and the rationale
 behind the format choice.
+
+## Training on the exports (Unsloth)
+
+The `openai_chat` export drops straight into Unsloth; `sharegpt` needs one
+normalize call.
+
+```python
+from datasets import load_dataset
+from unsloth.chat_templates import standardize_sharegpt
+
+# A) openai_chat — already in Unsloth's preferred shape
+ds = load_dataset("json", data_files="exports/openai_chat-*.jsonl", split="train")
+
+# B) sharegpt — one extra normalize step
+ds = load_dataset("json", data_files="exports/sharegpt-*.jsonl", split="train")
+ds = standardize_sharegpt(ds)
+```
+
+Two gotchas: assistant turns with only `tool_calls` carry `content: null`
+(modern templates handle it; some older Phi/Gemma templates need null → `""`),
+and `role: "tool"` rows need a tool-aware chat template (Llama 3.1+, Qwen 2.5,
+DeepSeek-R1). Filter them out otherwise. Details in
+[`docs/FORMAT.md`](docs/FORMAT.md#using-exports-with-unsloth).
