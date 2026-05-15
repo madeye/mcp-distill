@@ -42,7 +42,7 @@ enum Cmd {
 
 #[derive(clap::Args)]
 struct InstallArgs {
-    /// Target client. Currently: `codex`.
+    /// Target client: `codex` or `claude`.
     client: String,
     /// Server name to register (default: distill).
     #[arg(long, default_value = "distill")]
@@ -59,9 +59,10 @@ struct InstallArgs {
     /// Compression: `none` or `zstd` (writes MCP_DISTILL_COMPRESSION).
     #[arg(long)]
     compression: Option<String>,
-    /// Per-server tool-approval mode written into codex config: `auto` |
-    /// `prompt` | `approve`. Default `approve` so codex auto-approves our
-    /// recording calls (otherwise `codex exec` cancels them with no human).
+    /// (codex only) Per-server tool-approval mode written into codex config:
+    /// `auto` | `prompt` | `approve`. Default `approve` so codex auto-approves
+    /// our recording calls (otherwise `codex exec` cancels them with no human).
+    /// Ignored for claude — Claude Code handles approvals at runtime in its UI.
     #[arg(long, default_value = "approve")]
     approval: String,
     /// Overwrite an existing entry that differs from the new one.
@@ -71,7 +72,7 @@ struct InstallArgs {
 
 #[derive(clap::Args)]
 struct UninstallArgs {
-    /// Target client. Currently: `codex`.
+    /// Target client: `codex` or `claude`.
     client: String,
     /// Server name to remove (default: distill).
     #[arg(long, default_value = "distill")]
@@ -123,9 +124,13 @@ async fn main() -> Result<()> {
                 Some(p) => p,
                 None => current_binary()?,
             };
-            let approval_mode = match args.approval.as_str() {
-                "" | "none" | "off" => None,
-                other => Some(other.to_string()),
+            let approval_mode = if matches!(client, Client::Codex) {
+                match args.approval.as_str() {
+                    "" | "none" | "off" => None,
+                    other => Some(other.to_string()),
+                }
+            } else {
+                None
             };
             let spec = InstallSpec {
                 client,

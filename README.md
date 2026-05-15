@@ -21,19 +21,19 @@ Wire it into **codex** automatically:
 ./target/release/mcp-distill install codex \
   --store-root ~/.mcp-distill --compression zstd
 # adds [mcp_servers.distill] to ~/.codex/config.toml (preserves other settings)
+# sets default_tools_approval_mode = "approve" so codex doesn't cancel our calls
 # `install codex --force` overwrites a differing existing entry
 # `uninstall codex` removes it
 ```
 
-Wire it into Claude Code manually:
+Wire it into **Claude Code** automatically (requires `claude` CLI):
 
-```jsonc
-// .claude/settings.json
-{
-  "mcpServers": {
-    "distill": { "command": "/abs/path/to/mcp-distill", "args": ["serve"] }
-  }
-}
+```bash
+./target/release/mcp-distill install claude \
+  --store-root ~/.mcp-distill --compression zstd
+# shells out to `claude mcp add -s user` (writes ~/.claude.json, user scope)
+# `install claude --force` removes any existing entry with the same name first
+# `uninstall claude` runs `claude mcp remove -s user distill`
 ```
 
 ## MCP tools exposed

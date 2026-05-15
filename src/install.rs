@@ -1,25 +1,33 @@
 //! Wire `mcp-distill` into agent CLIs as an MCP server.
 //!
-//! Currently supports codex (`~/.codex/config.toml`, override via `$CODEX_HOME`).
-//! Edits are made in-place with `toml_edit` to preserve other settings,
-//! comments, and formatting.
+//! Supports:
+//! - **codex**: edits `~/.codex/config.toml` (override via `$CODEX_HOME`)
+//!   in place via `toml_edit`, preserving other settings/comments.
+//! - **claude** (Claude Code): shells out to `claude mcp add -s user`,
+//!   which writes user-scope MCP config (~/.claude.json) in whatever
+//!   format the installed CLI version expects.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 use toml_edit::{value, Array, DocumentMut, Item, Table};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Client {
     Codex,
+    Claude,
 }
 
 impl Client {
     pub fn parse(s: &str) -> Result<Self> {
         match s.to_ascii_lowercase().as_str() {
             "codex" => Ok(Client::Codex),
-            other => Err(anyhow!("unknown client {other:?} (supported: codex)")),
+            "claude" | "claude-code" | "claudecode" => Ok(Client::Claude),
+            other => Err(anyhow!(
+                "unknown client {other:?} (supported: codex, claude)"
+            )),
         }
     }
 
@@ -33,6 +41,13 @@ impl Client {
                     return home.home_dir().join(".codex").join("config.toml");
                 }
                 PathBuf::from(".codex/config.toml")
+            }
+            Client::Claude => {
+                // Best-guess for *reporting* — actual writes go through `claude mcp`.
+                if let Some(home) = directories::BaseDirs::new() {
+                    return home.home_dir().join(".claude.json");
+                }
+                PathBuf::from(".claude.json")
             }
         }
     }
@@ -93,16 +108,7 @@ fn build_server_table(spec: &InstallSpec) -> Table {
     args.push("serve");
     t["args"] = value(args);
 
-    let mut envs: Vec<(&str, String)> = Vec::new();
-    if let Some(root) = &spec.store_root {
-        envs.push(("MCP_DISTILL_ROOT", root.to_string_lossy().to_string()));
-    }
-    if spec.keep_raw {
-        envs.push(("MCP_DISTILL_KEEP_RAW", "1".to_string()));
-    }
-    if let Some(comp) = &spec.compression {
-        envs.push(("MCP_DISTILL_COMPRESSION", comp.clone()));
-    }
+    let envs = env_pairs(spec);
     if !envs.is_empty() {
         let mut env_tbl = Table::new();
         env_tbl.set_implicit(false);
@@ -121,7 +127,29 @@ fn server_tables_equal(a: &Table, b: &Table) -> bool {
     a.to_string() == b.to_string()
 }
 
+/// Build the env-var pairs we want exported into the spawned server.
+fn env_pairs(spec: &InstallSpec) -> Vec<(&'static str, String)> {
+    let mut envs: Vec<(&'static str, String)> = Vec::new();
+    if let Some(root) = &spec.store_root {
+        envs.push(("MCP_DISTILL_ROOT", root.to_string_lossy().to_string()));
+    }
+    if spec.keep_raw {
+        envs.push(("MCP_DISTILL_KEEP_RAW", "1".to_string()));
+    }
+    if let Some(comp) = &spec.compression {
+        envs.push(("MCP_DISTILL_COMPRESSION", comp.clone()));
+    }
+    envs
+}
+
 pub fn install(spec: &InstallSpec) -> Result<InstallReport> {
+    match spec.client {
+        Client::Codex => install_codex(spec),
+        Client::Claude => install_claude(spec),
+    }
+}
+
+fn install_codex(spec: &InstallSpec) -> Result<InstallReport> {
     let path = spec.client.config_path();
     ensure_parent(&path)?;
     let mut doc = load_or_new(&path)?;
@@ -172,6 +200,13 @@ pub fn install(spec: &InstallSpec) -> Result<InstallReport> {
 }
 
 pub fn uninstall(client: Client, server_name: &str) -> Result<InstallReport> {
+    match client {
+        Client::Codex => uninstall_codex(client, server_name),
+        Client::Claude => uninstall_claude(server_name),
+    }
+}
+
+fn uninstall_codex(client: Client, server_name: &str) -> Result<InstallReport> {
     let path = client.config_path();
     if !path.exists() {
         return Ok(InstallReport {
@@ -193,6 +228,124 @@ pub fn uninstall(client: Client, server_name: &str) -> Result<InstallReport> {
     Ok(InstallReport {
         config_path: path,
         action,
+    })
+}
+
+// --- claude (Claude Code) ----------------------------------------------------
+
+fn require_claude_cli() -> Result<()> {
+    Command::new("claude")
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            anyhow!(
+                "could not invoke `claude` CLI: {e}. \
+             Install Claude Code (https://claude.com/claude-code) and ensure `claude` is on PATH."
+            )
+        })?;
+    Ok(())
+}
+
+/// Whether `claude mcp` already has an entry with this name (any scope).
+fn claude_has_server(name: &str) -> Result<bool> {
+    let out = Command::new("claude")
+        .args(["mcp", "get", name])
+        .output()
+        .with_context(|| "spawn `claude mcp get`")?;
+    Ok(out.status.success())
+}
+
+fn claude_remove(name: &str) -> Result<()> {
+    // Try user scope first; fall back to default scope. Either succeeding is fine.
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "-s", "user", name])
+        .status();
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", name])
+        .status();
+    Ok(())
+}
+
+/// Build the argv we pass to `claude mcp add`. Public for unit testing.
+pub fn claude_install_argv(spec: &InstallSpec) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["mcp".into(), "add".into(), "-s".into(), "user".into()];
+    // `claude mcp add` declares `-e` as variadic, so a chain of `-e K=V` will
+    // greedily swallow the next positional (the server name) as another env
+    // value. The `--env=K=V` form is a single token and avoids this.
+    for (k, v) in env_pairs(spec) {
+        argv.push(format!("--env={k}={v}"));
+    }
+    argv.push(spec.server_name.clone());
+    argv.push("--".into());
+    argv.push(spec.binary.to_string_lossy().to_string());
+    argv.push("serve".into());
+    argv
+}
+
+fn install_claude(spec: &InstallSpec) -> Result<InstallReport> {
+    require_claude_cli()?;
+    let existed = claude_has_server(&spec.server_name)?;
+    if existed && !spec.force {
+        return Err(anyhow!(
+            "claude already has an MCP server named {:?}; pass --force to overwrite",
+            spec.server_name,
+        ));
+    }
+    if existed {
+        claude_remove(&spec.server_name)?;
+    }
+    let argv = claude_install_argv(spec);
+    let out = Command::new("claude")
+        .args(&argv)
+        .output()
+        .with_context(|| "spawn `claude mcp add`")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "`claude mcp add` failed (status={:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        ));
+    }
+    let action = if existed {
+        Action::Updated
+    } else {
+        Action::Created
+    };
+    Ok(InstallReport {
+        config_path: Client::Claude.config_path(),
+        action,
+    })
+}
+
+fn uninstall_claude(server_name: &str) -> Result<InstallReport> {
+    require_claude_cli()?;
+    let existed = claude_has_server(server_name)?;
+    if !existed {
+        return Ok(InstallReport {
+            config_path: Client::Claude.config_path(),
+            action: Action::NotPresent,
+        });
+    }
+    let out = Command::new("claude")
+        .args(["mcp", "remove", "-s", "user", server_name])
+        .output()
+        .with_context(|| "spawn `claude mcp remove`")?;
+    if !out.status.success() {
+        // Try without explicit scope — older claude versions or different default scope.
+        let out2 = Command::new("claude")
+            .args(["mcp", "remove", server_name])
+            .output()
+            .with_context(|| "spawn `claude mcp remove` (fallback)")?;
+        if !out2.status.success() {
+            return Err(anyhow!(
+                "`claude mcp remove` failed: {}",
+                String::from_utf8_lossy(&out2.stderr).trim(),
+            ));
+        }
+    }
+    Ok(InstallReport {
+        config_path: Client::Claude.config_path(),
+        action: Action::Removed,
     })
 }
 
@@ -294,6 +447,38 @@ mod tests {
         assert_eq!(report.action, Action::Removed);
         let body = fs::read_to_string(&report.config_path).unwrap();
         assert!(!body.contains("[mcp_servers.distill]"));
+    }
+
+    #[test]
+    fn claude_argv_includes_env_and_serve() {
+        let mut spec = make_spec("distill");
+        spec.client = Client::Claude;
+        spec.keep_raw = true;
+        let argv = claude_install_argv(&spec);
+        assert_eq!(&argv[0..4], &["mcp", "add", "-s", "user"]);
+        assert!(argv
+            .iter()
+            .any(|s| s == "--env=MCP_DISTILL_ROOT=/tmp/distill"));
+        assert!(argv.iter().any(|s| s == "--env=MCP_DISTILL_KEEP_RAW=1"));
+        assert!(argv
+            .iter()
+            .any(|s| s == "--env=MCP_DISTILL_COMPRESSION=zstd"));
+        // server name, separator, command, command-arg
+        let sep = argv.iter().position(|s| s == "--").unwrap();
+        assert_eq!(argv[sep - 1], "distill");
+        assert_eq!(argv[sep + 1], "/usr/local/bin/mcp-distill");
+        assert_eq!(argv[sep + 2], "serve");
+    }
+
+    #[test]
+    fn claude_argv_omits_unset_env() {
+        let mut spec = make_spec("distill");
+        spec.client = Client::Claude;
+        spec.store_root = None;
+        spec.compression = None;
+        spec.keep_raw = false;
+        let argv = claude_install_argv(&spec);
+        assert!(!argv.iter().any(|s| s.starts_with("--env=")));
     }
 
     #[test]
